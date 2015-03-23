@@ -1,0 +1,461 @@
+#!/usr/bin/perl
+use strict;
+use warnings;
+
+use Zeta::Run;
+use Env qw/ZBP_HOME/;
+use Carp;
+use DBI;
+
+########################################################################
+#                        通用数据库功能
+#-----------------------------------------------------------------------
+#  dependencies          :  N
+#  initialization param  : { dsn => $dsn, dbuser => $dbuser, dbpass => $dbpas, ...}
+#  interface             :
+#   1.  disconnect       : 断口数据库连接
+#   2.  prepare          : 编译sql
+#   3.  prepare_cached   : 带缓存的sql编译
+#   4.  insert           : 插入数据库记录
+#   5.  select           : 查询单条数据库记录
+#   6.  select_fld       : 查询单调数据库记录 只要制定域
+#   7.  select_fld_cond  : 查询单条数据库记录 条件为条件字符串
+#   8.  update           : 更新制定域为指定值的记录
+#   9.  update_cond      : 更新满足条件的记录
+#   10. delete           : 删除制定域为指定值的记录
+#   11. delete_cond      : 删除满足条件的记录
+########################################################################
+my $dbh;
+
+#
+# $self->disconnect();  断开数据库连接 
+# $self->prepare($sql)  编译sql 
+# $self->commit()       提交transaction 
+#
+# helper dbh            => sub { $dbh };
+helper dbh            => sub { $dbh };
+helper dberr          => sub { $dbh->err || '0000' };
+helper disconnect     => sub { return $dbh->disconnect()   or confess "can not disconnect()"; };
+helper prepare        => sub { return $dbh->prepare($_[1]) or confess "can not prepare"; };
+helper prepare_cached => sub { return $dbh->prepare_cached($_[1]) or confess "can not prepare_cached"; };
+helper begin_work     => sub { return $dbh->begin_work() or confess "can not begin work"; };
+helper commit         => sub { return $dbh->commit() or confess "can not commit"; };
+
+#
+# 通用数据库插入功能
+# $self->insert($table_name, {fld_x => 'val_x', ...}, { fld_reg => 'reg expression' })
+#
+helper insert => sub {
+    confess "plugin db does not initialized" unless $dbh;
+    my ($self, $table, $row, $reg) = @_;
+
+    for ( keys %$row) {
+       delete $row->{$_} unless defined $row->{$_};
+    }
+
+    my @fld = sort keys %$row;
+    my @val = @{$row}{@fld};
+    
+    my $sql;
+    if ($reg && %$reg ) {
+        my @fld_reg = sort keys %$reg;
+        my @val_reg = @{$reg}{@fld_reg};
+        $sql = sprintf("insert into %s (%s) values (%s)",
+                          $table,
+                          join(', ', @fld, @fld_reg),
+                          join(', ', ('?') x @fld, @val_reg),
+                          );
+
+        warn "insert sql[$sql] val[@val]" if $ENV{PLUGIN_DB_DEBUG};
+    }
+    else {
+        $sql = sprintf("insert into %s (%s) values (%s)",
+                          $table,
+                          join(', ', @fld),
+                          join(', ', ('?') x @fld));
+        warn "insert sql[$sql] val[@val]" if $ENV{PLUGIN_DB_DEBUG};
+    }
+    
+    my $sth = $dbh->prepare_cached(
+        $sql,
+        {},
+        2,
+    ) or confess "can not prepare_cached[$sql]";
+    $sth->execute(@val); # or warn "can not execute[$sql][@val]";
+    return $self;
+};
+
+#
+# 通用数据库查找功能
+# $self->select($table_name, { fld_a => '1', fld_b => '2'}, $update )
+#
+# $table  : 表名
+# $cond   : 条件域以及域值
+# $update : with rs for update
+#
+helper select  => sub {
+    
+    my ($self, $table, $cond, $update) = @_;
+    #zlogger->debug("table :\n".Data::Dump->dump($table)."cond :\n".Data::Dump->dump($cond));
+
+    confess "no connection to database" unless $dbh;
+    $table or croak "error";
+
+    my @fld = sort keys %$cond;
+    my @val = @{$cond}{@fld};
+    
+    # 组sql语句
+    my $sql = "select * from $table where " . join(" and ", map { "$_ = ?" } @fld);
+    $sql .= ' with rs for update' if $update;
+    warn "select sql[$sql] val[@val]" if $ENV{PLUGIN_DB_DEBUG};
+    
+    # prepare
+    my $sth = $dbh->prepare_cached($sql) or confess "can not prepare_cached[$sql]";
+    
+    # 执行
+    $sth->execute(@val) or confess "can not execute[$sql][@val]";
+    
+    # fetch
+    my $row = $sth->fetchrow_hashref();
+    
+    # finish()
+    $sth->finish();
+    
+    # 返回
+    return $row;
+};
+
+
+
+#
+# 通用数据库查找功能
+# $self->select_fld($table_name, ['fld_x', 'fld_y'], { fld_a => '1', fld_b => '2'}, $update)
+#
+# $table  : 表名
+# $need   : [ 'fld_x', 'fld_y' ]
+# $cond   : 条件域以及域值
+# $update : with rs for update
+#
+helper select_fld => sub {
+    
+    confess "plugin db does not initialized" unless $dbh;
+    my ($self, $table, $need, $cond, $update) = @_;
+    
+    confess "no connection to database" unless $dbh;
+
+    my @fld = sort keys %$cond;
+    my @val = @{$cond}{@fld};
+    
+    # 组sql语句
+    my $sql = "select " . join(',', @$need) . " from $table where " . join(" and ", map { "$_ = ?" } @fld);
+    $sql .= ' with rs for update' if $update;
+    warn "select sql[$sql] val[@val]" if $ENV{PLUGIN_DB_DEBUG};
+    
+    # prepare
+    my $sth = $dbh->prepare_cached($sql) or confess "can not prepare_cached[$sql]";
+    
+    # 执行
+    $sth->execute(@val) or confess "can not execute[$sql][@val]";
+    
+    # fetch
+    my $row = $sth->fetchrow_hashref();
+    
+    # finish()
+    $sth->finish();
+    
+    # 返回
+    return $row;
+};
+
+#
+# 通用数据库查找功能
+# $self->select_fld_cond($table_name, ['fld_x', 'fld_y'], { cond => $str, val = [] }, $update)
+#
+# $table  : 表名
+# $need   : [ 'fld_x', 'fld_y' ]
+# $cond   : 条件字符串， 以及条件值
+# $update :
+#
+helper select_fld_cond => sub {
+    
+    confess "plugin db does not initialized" unless $dbh;
+    
+    my ($self, $table, $need, $cond, $update) = @_;
+    
+    confess "no connection to database" unless $dbh;
+    
+    # 组sql语句
+    my $sql = "select " . join(',', @$need) . " from $table where $cond->{cond}";
+    $sql .= ' with rs for update' if $update;
+    warn "select sql[$sql] val[@{$cond->{val}}]" if $ENV{PLUGIN_DB_DEBUG};
+    
+    # prepare
+    my $sth = $dbh->prepare_cached($sql) or confess "can not prepare_cached[$sql]";
+    
+    # 执行
+    $sth->execute(@{$cond->{val}}) or confess "can not execute[$sql][@{$cond->{val}}]";
+    
+    # fetch
+    my $row = $sth->fetchrow_hashref();
+    
+    # finish()
+    $sth->finish();
+    
+    # 返回
+    return $row;    
+};
+
+
+#
+# 通用数据库更新功能
+# $self->update($table_name, { fld_a => '1' }, { cond_fld_x = '2'} )
+#
+# $table:   表名称
+# $row:     要更新的字段与值
+# $cond:    更新条件域与值
+#
+helper update => sub {
+    
+    confess "plugin db does not initialized" unless $dbh;
+    
+    my ($self, $table, $row, $cond) = @_;
+
+    for (keys %$row) {
+        delete $row->{$_} unless defined $row->{$_};
+    }
+
+    my @fld = sort keys %$row;
+    my @val = @{$row}{@fld};
+    my @cond_fld = sort keys %$cond;
+    my @cond_val = @{$cond}{@cond_fld};
+    my $sql;
+    my $sth;
+
+    my $cnt;
+    if (@cond_fld) {
+        $sql = sprintf("update %s set %s where %s",
+                      $table,
+                      join(', ',   map { "$_ = ?" } @fld),
+                      join(' and ', map { "$_ = ?" } @cond_fld),
+                      );
+        warn "update sql[$sql] val[@cond_val]" if $ENV{PLUGIN_DB_DEBUG};
+        
+        $sth = $self->prepare_cached($sql) or confess "can not prepare_cached[$sql]";
+        $cnt = $sth->execute(@val, @cond_val);
+    }
+    else {
+        $sql = sprintf("update %s set %s",
+                      $table,
+                      join(',',   map { "$_ = ?" } @fld));
+        
+        warn "update sql[$sql]" if $ENV{PLUGIN_DB_DEBUG};
+
+        my $sth = $self->prepare_cached($sql) or confess "can not prepare_cached[$sql]";
+        $cnt  = $sth->execute(@val);
+    }
+    unless( defined $cnt) {
+        confess "sql[$sql] [@cond_val]failed";
+    }
+
+    return $cnt;
+};
+
+#
+# 通用数据库更新功能
+# $self->update_reg($table_name, { fld_a => '1' }, { rec_upd_ts => 'current timestamp' }, { cond_fld_x = '2'} )
+#
+# $table:   表名称
+# $row:     要更新的字段与值
+# $reg:     需要更新的字段寄存器
+# $cond:    更新条件域与值
+#
+helper update_reg => sub {
+    confess "plugin db does not initialized" unless $dbh;
+    
+    my ($self, $table, $row, $reg, $cond) = @_;
+
+    for (keys %$row) {
+        delete $row->{$_} unless defined $row->{$_};
+    }
+
+    my @fld = sort keys %$row;
+    my @val = @{$row}{@fld};
+    my @cond_fld = sort keys %$cond;
+    my @cond_val = @{$cond}{@cond_fld};
+    my $sql;
+    my $sth;
+
+    my $cnt;
+    if (@cond_fld) {
+        $sql = sprintf("update %s set %s where %s",
+                      $table,
+                      join(', ', ((map { "$_ = ?" } @fld), map { "$_ = $reg->{$_}" }  keys %$reg)),
+                      join(' and ', map { "$_ = ?" } @cond_fld),
+                      );
+        warn "update sql[$sql] val[@cond_val]" if $ENV{PLUGIN_DB_DEBUG};
+        
+        $sth = $self->prepare_cached($sql) or confess "can not prepare_cached[$sql]";
+        $cnt = $sth->execute(@val, @cond_val);
+    }
+    else {
+        $sql = sprintf("update %s %s",
+                      $table,
+                      join(', ', ((map { "$_ = ?" } @fld), map { "$_ = $reg->{$_}" }  keys %$reg)),
+                     );
+        
+        warn "update sql[$sql]" if $ENV{PLUGIN_DB_DEBUG};
+
+        my $sth = $self->prepare_cached($sql) or confess "can not prepare_cached[$sql]";
+        $cnt = $sth->execute(@val);
+    }
+    unless( defined $cnt) {
+        confess "sql[$sql] [@cond_val] failed";
+    }
+    return $cnt;
+};
+
+#
+# 通用数据库更新功能
+# $self->update($table_name, { fld_a => 'a', ..}, { cond => $cond_str, val => [] } )
+#
+# $table:   表名称
+# $row:     要更新的字段与值
+# $cond:    更新条件字符串 以及条件值
+#
+helper update_cond => sub {
+    
+    confess "plugin db does not initialized" unless $dbh;
+    
+    my ($self, $table, $row, $cond) = @_;
+
+    for (keys %$row) {
+        delete $row->{$_} unless defined $row->{$_};
+    }
+
+    my @fld = sort keys %$row;
+    my @val = @{$row}{@fld};
+    my $sql;
+    my $cnt;
+ 
+    $sql = sprintf("update %s set %s where %s",
+                  $table,
+                  join(',',   map { "$_ = ?" } @fld),
+                  $cond->{cond}
+                  );
+    warn "update_cond sql[$sql] val[@{$cond->{val}}]" if $ENV{PLUGIN_DB_DEBUG};
+    
+    my $sth = $self->prepare_cached($sql) or confess "can not prepare_cached[$sql]";
+    $cnt = $sth->execute(@val, @{$cond->{val}}) ;
+
+    unless( defined $cnt) {
+        confess "sql[$sql] [$sql][@val][@{$cond->{val}}] failed"; 
+    }
+    return $cnt;
+};
+
+#
+# 通用数据库删除功能
+# $self->delete($table, { cond_fld_1 = 'a',  cond_fld_2 = 'b' } )
+#
+# $table  : 表名称
+# $cond   : 条件域以及域值
+#
+helper delete => sub {
+    
+    confess "plugin db does not initialized" unless $dbh;
+    
+    my ($self, $table, $cond) = @_;
+
+    confess "no connection to database" unless $dbh;
+
+    my @fld = sort keys %$cond;
+    my @val = @{$cond}{@fld};
+    
+    my $sql = sprintf("delete from %s where %s",
+                  $table,
+                  join(' and ', map { "$_ = ?" } @fld),
+                  );
+    warn "delete sql[$sql] val[@{$cond->{val}}]" if $ENV{PLUGIN_DB_DEBUG};
+    
+    my $sth = $self->prepare_cached($sql) or confess "can not prepare_cached[$sql]";
+    $sth->execute(@val) or confess "can not execute[$sql][@val]";
+    
+    $sth->finish();
+   
+    return $self;   
+};
+
+#
+# 通用数据库删除功能
+# $self->delete_cond($table, { cond => $cond_str, val => [] } )
+#
+# $table  : 表名称
+# $cond   : 条件域以及域值
+#
+helper delete_cond => sub {
+    
+    confess "plugin db does not initialized" unless $dbh;
+    
+    my ($self, $table, $cond) = @_;
+    confess "no connection to database" unless $dbh;
+    
+    my $sql = sprintf("delete from %s where %s",$table, $cond->{cond});
+    warn "delete_cond sql[$sql] val[@{$cond->{val}}]" if $ENV{PLUGIN_DB_DEBUG};
+
+    my $sth = $self->prepare_cached($sql) or confess "can not prepare_cached[$sql]";
+    $sth->execute(@{$cond->{val}}) or confess "can not execute[$sql][@{$cond->{val}}]";
+    return $self;   
+};
+
+#
+#
+#
+
+warn "-------------------------\n" and
+warn "db.plugin loaded:\n"         and
+warn "-------------------------\n" and
+warn <<'EOF' if $ENV{PLUGIN_LOAD_DEBUG};
+#  dependencies          :  N
+#  initialization param  : { dsn => $dsn, dbuser => $dbuser, dbpass => $dbpas, ...}
+#  interface             :
+#   1.  disconnect       : 断口数据库连接
+#   2.  prepare          : 编译sql
+#   3.  prepare_cached   : 带缓存的sql编译
+#   4.  insert           : 插入数据库记录
+#   5.  select           : 查询单条数据库记录
+#   6.  select_fld       : 查询单调数据库记录 只要制定域
+#   7.  select_fld_cond  : 查询单条数据库记录 条件为条件字符串
+#   8.  update           : 更新制定域为指定值的记录
+#   9.  update_cond      : 更新满足条件的记录
+#   10. delete           : 删除制定域为指定值的记录
+#   11. delete_cond      : 删除满足条件的记录
+EOF
+
+
+#
+# initor  连接数据库
+#
+sub  {
+    my $dbconfig = { @_ };
+    
+    # 连接数据库
+    $dbh = DBI->connect(
+        @{$dbconfig}{qw/dsn dbuser dbpass/},
+        {
+            RaiseError       => 0,
+            PrintError       => 0,
+            AutoCommit       => 0,
+            FetchHashKeyName => 'NAME_lc',
+            ChopBlanks       => 1,
+            Profile          => $dbconfig->{profile},
+        }
+    );
+    unless($dbh) {
+        confess "can not connect $dbconfig->{dsn}";
+        return;
+    }
+    $dbh->do("set current schema $dbconfig->{schema}") or die "can not set current schema $dbconfig->{schema}";
+    return 1;
+};
+
+__END__

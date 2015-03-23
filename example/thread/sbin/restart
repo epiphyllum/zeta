@@ -1,0 +1,14 @@
+#!/bin/bash
+
+# 停止应用
+if [ -f "$THREAD_HOME/log/zeta.pid" ]; then 
+    kill `cat $THREAD_HOME/log/zeta.pid`;
+fi
+rm -fr $THREAD_HOME/log/zeta.pid;
+
+# 清理日志
+cd $THREAD_HOME/log;
+rm -fr *.log;
+
+zeta -f $THREAD_HOME/conf/zeta.conf;
+

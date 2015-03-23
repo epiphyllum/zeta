@@ -1,0 +1,4 @@
+sub {
+    my ($ctx, $req) = @_;
+    return "hello world";
+};

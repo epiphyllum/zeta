@@ -1,0 +1,7 @@
+#!/bin/bash
+
+export APP_HOME=.;
+export PLUGIN_PATH=.;
+export PERL5LIB=~/workspace/zeta/lib
+../../bin/zeta -f zeta.conf
+

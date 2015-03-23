@@ -1,0 +1,52 @@
+#!/usr/bin/perl
+use strict;
+use warnings;
+use Zeta::Run;
+use Zeta::Log;
+
+########################################################################
+#                        daemonize.plugin
+#-----------------------------------------------------------------------
+#  dependencies          :  
+#  initialization param  : Zeta::Log的参数
+#  interface             :
+#   1. logger            : 获取logger对象
+#   2. logger_child      : 子进程logger复制
+########################################################################
+
+my $logger;
+helper logger => sub { $logger };
+
+
+##
+# internal child logger clone
+# $self->logger_child('ModuleA', 'ERROR');
+##
+helper logger_child => sub { my ($self, $name, $loglevel) = @_; $logger->clone( "$name.log", $loglevel ); };
+helper logger_reset => sub { shift; $logger = shift; };
+helper logger_monq  => sub { $logger->{logmonq};  };
+
+
+
+warn "-------------------------\n"  and
+warn "kernel.plugin loaded:\n"     and
+warn "-------------------------\n"  and
+warn <<EOF if $ENV{PLUGIN_LOAD_DEBUG};
+#  dependencies          :  
+#  initialization param  : Zeta::Log的参数
+#  interface             :
+#   1. logger            : 获取logger对象
+#   2. logger_child      : 子进程logger复制
+EOF
+
+
+#
+# $initor->(@_)
+#
+sub {
+    $logger = Zeta::Log->new(@_);
+    return 1;
+};
+
+
+__END__

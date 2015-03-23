@@ -1,0 +1,105 @@
+#!/usr/bin/perl
+use strict;
+use warnings;
+use Carp;
+use Zeta::Run;
+use IO::File;
+
+########################################################################
+#                        daemonize.plugin
+#-----------------------------------------------------------------------
+#  dependencies          :  
+#  initialization param  : $name,$pidfile
+#  interface             :
+#   1. daemonize_pidfile : 获取pid文件名称
+#   2. daemonize_name    : 获取进程组名称
+########################################################################
+my $mode;    # 运行模式
+my $name;    # 进程组名称
+my $pidfile; # pid文件
+my $cmdline;
+
+#
+# pid文件
+# 进程名称
+#
+helper daemonize_pidfile => sub { $pidfile };
+helper daemonize_name    => sub { $name    };
+helper daemonize_restart => sub {
+    zlogger->info("restart[$0] with[$cmdline]...");
+    local $SIG{TERM} = 'IGNORE';
+    kill 15, -$$;
+    unlink $pidfile;    
+    exec $cmdline;
+};
+
+warn "-------------------------\n"  and
+warn "daemonize.plugin loaded:\n"  and
+warn "-------------------------\n"  and
+warn <<EOF if $ENV{PLUGIN_LOAD_DEBUG};
+#  dependencies          :  
+#  initialization param  : $pidfile, $name
+#  interface             :
+#   1. daemonize_pidfile : 获取pid文件名称
+#   2. daemonize_name    : 获取进程组名称
+EOF
+
+
+#
+# 插件初始化
+# $initor->($name, $pidfile)
+#
+sub {
+    ($name, $pidfile) = @_;
+
+    $cmdline = "$0 @ARGV";
+    
+    my $run = 0;
+    my $pid = 0;
+    if ( $pidfile && -f $pidfile ) {
+        my $pid = `cat $pidfile`;
+        chomp($pid);
+        if ($pid) {
+            my @ps = `ps -p $pid`;
+            if (@ps == 2) {
+               $run = (split '\s+', $ps[1])[1];
+               chomp $run;
+            }
+        }
+    }
+    
+    confess "process [$run = $pid] already running" if $run;
+
+    my $grand_father = fork();
+    exit if $grand_father;
+
+    unless ( defined $grand_father ) {
+        confess "Couldn't fork!: $!";
+    }
+
+    unless ( POSIX::setsid() ) {
+        confess "Couldn't start a new session: $!";
+    }
+
+    ##################################
+    # pid file
+    ##################################
+    my $pidfh;
+    if ( $pidfile ) {
+        $pidfh = IO::File->new("> $pidfile");
+    }
+    elsif ($pidfile) {
+        $pidfh = IO::File->new("> $pidfile");
+    }
+    if ($pidfh) {
+        $pidfh->print($$);
+        $pidfh->close();
+    }
+
+    $0 = $name;
+
+    return 1;
+};
+
+__END__
+

@@ -1,0 +1,10 @@
+#!/usr/bin/perl
+use Encode qw/from_to decode/;
+
+my $str = '中国',
+my $ust = decode('utf8', $str);
+my $len = from_to($ust, 'utf8', 'gbk');
+print $len, "\n";
+
+print $ust;
+

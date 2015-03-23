@@ -1,0 +1,98 @@
+#!/usr/bin/perl
+use strict;
+use warnings;
+use Getopt::Long;
+use Data::Dump;
+use HTML::Escape qw/escape_html/;
+use Zeta::Mailer;
+use Zeta::Mailer::Simple;
+
+my @to;
+my @cc;
+my @attach;
+my $sub;
+my $body;
+my $sms;
+
+my $rtn = GetOptions(
+    "to|t=s"      => \@to,
+    "cc|c=s"      => \@cc,
+    "attach|a=s"  => \@attach,
+    "subject|s=s" => \$sub,
+    "body|b=s"    => \$body,
+    "sms|m"       => \$sms,
+);
+unless($rtn) {
+    usage();
+}
+unless(@to) {
+    usage();
+}
+unless($sub && $body) {
+    usage();
+}
+
+my $m;
+# 简单信息 - 适合发送短信
+if ($sms) {
+    $m = Zeta::Mailer::Simple->new();
+}
+else {
+    $m = Zeta::Mailer->new( debug => 0,);
+    if ($body =~ /^-$/) {
+        $body = join "\n", map { chomp; $_ . "<br/>" } <>;
+    }
+    $body = "<div>$body</div>";
+    for (@attach) {
+        unless( -f $_) {
+            warn "can file[$_] does not exists";
+            usage();
+        }
+    }
+}
+
+# warn "body:  $body";
+
+$m->set_all(
+  'from'    => "$ENV{XMAIL_USER}\@yeepay.com",
+  'to'      => [ @to ],
+  'cc'      => [ @cc ],
+  'subject' => $sub,
+  'body'    => $body,
+  'attach'  => [ @attach ],
+);
+
+$m->send();
+
+sub usage {
+    die <<'EOF';
+usage:
+
+    # 一般用法
+    zmail -t tailin.liu@yeepay.com -t ding.luo@yeeay.com \
+          -c chao.zhou@yeepay.com \
+          -a ./zmail -a ./zmail \
+          -s subject \
+          -b "hello world" \
+          -m 
+
+    #  -b - 代表从标志输入读取, 用于管道处理
+    cat Run.pm | zmail -t 18874881230@139.com -s subject -b body
+
+参数说明:
+    -t|--to      : 发送给谁, 可以指定多个
+    -c|--cc      : 抄送给谁, 可以指定多个
+    -a|--attach  : 附件, 可以指定多个附件
+    -s|--subject : 邮件标题
+    -b|--body    : 邮件正文内容('-b -'代表从标志输入读)
+    -m|--sms     : 纯文本内容(适合139邮箱短信) flag
+
+#
+# 如果遇到不能auth的情况
+# 需要安装
+# sudo cpan -i Authen::SASL
+#
+
+EOF
+}
+

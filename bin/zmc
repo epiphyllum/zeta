@@ -1,0 +1,73 @@
+#!/usr/bin/perl
+use strict;
+use warnings;
+use Getopt::Long;
+use Data::Dump;
+use HTML::Escape qw/escape_html/;
+use Net::Stomp;
+use JSON::XS;
+use Getopt::Long;
+
+my @to;
+my @cc;
+my @attach;
+my $sub;
+my $body;
+my $simple;
+my $rtn = GetOptions(
+    "to|t=s"      => \@to,
+    "cc|c=s"      => \@cc,
+    "attach|a=s"  => \@attach,
+    "subject|s=s" => \$sub,
+    "body|b=s"    => \$body,
+    "sms|m"       => \$simple,
+);
+unless($rtn) {
+    usage();
+}
+unless(@to) {
+    usage();
+}
+unless($sub && $body) {
+    usage();
+}
+
+my $stp = Net::Stomp->new({ 
+    hostname => $ENV{STOMP_HOST}, 
+    port     => $ENV{STOMP_PORT}
+});
+$stp->connect({ login => 'hello', passcode => 'there' });
+$stp->send({ 
+    destination => "/queue/$ENV{MQ_MAILER}",
+    body        => encode_json({
+        to      => \@to,
+        cc      => \@cc,
+        subject => 'test msg',
+        body    => 'test',
+        simple  => $simple,
+    }),
+});
+$stp->disconnect;
+
+sub usage {
+    die <<'EOF';
+Usage:
+
+    # 一般用法
+    zmc -t tailin.liu@yeepay.com -t ding.luo@yeeay.com \
+          -c chao.zhou@yeepay.com \
+          -a ./zmc -a ./zmc \
+          -s subject \
+          -b "hello world" \
+          -m 
+参数说明:
+    -t|--to      : 发送给谁, 可以指定多个
+    -c|--cc      : 抄送给谁, 可以指定多个
+    -a|--attach  : 附件, 可以指定多个附件
+    -s|--subject : 邮件标题
+    -b|--body    : 邮件正文内容('-b -'代表从标志输入读)
+    -m|--sms     : 纯文本内容(适合139邮箱短信) flag
+
+EOF
+}
+

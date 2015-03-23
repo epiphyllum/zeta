@@ -1,0 +1,2 @@
+cd $TAPP_HOME/log;
+kill `cat zeta.pid`;

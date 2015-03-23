@@ -1,0 +1,67 @@
+#!/usr/bin/perl
+use strict;
+use warnings;
+
+use Zeta::Run;
+use Env qw/ZBP_HOME/;
+
+########################################################################
+#                  时间函数
+#-----------------------------------------------------------------------
+#  dependencies          : N 
+#  initialization param  : N/A
+#  interface             :
+#   1. yyyymmdd          : 20121212 
+#   2. mmdd              : 0202
+#   3. hhmmss            : 121212
+#   4. yyyymmddhhmmss    : 20121212000000
+########################################################################
+
+helper yyyymmdd => sub {
+    my ($self) = @_;
+    my ($y, $m, $d) = (localtime)[5,4,3];
+    $y += 1900;
+    $m += 1;
+    return sprintf("%04d%02d%02d", $y, $m, $d);
+};
+
+helper yymmdd => sub {
+    my ($self) = @_;
+    my ($y, $m, $d) = (localtime)[5, 4,3];
+    $y += 1900;
+    $m += 1;
+    $y = substr($y, 2);
+    return sprintf("%02d%02d%02d", $y, $m, $d);
+};
+
+helper hhmmss => sub {
+    my ($self) = @_;
+    return sprintf("%04d%02d%02d", (localtime)[2,1,0]);
+};
+
+helper yyyymmddhhmmss => sub {
+    my ($self) = @_;
+    my ($y, $m, $d, $H, $M, $S) = (localtime)[5, 4,3,2,1,0];
+    $y += 1900;
+    $m += 1;
+    return sprintf("%04d%02d%02d%02d%02d%02d", $y, $m, $d, $H, $M, $S);
+};
+
+warn "-------------------------\n" and
+warn "time.plugin loaded:\n"       and
+warn "-------------------------\n" and
+warn <<EOF if $ENV{PLUGIN_LOAD_DEBUG};
+#  dependencies          : N 
+#  initialization param  : N/A
+#  interface             :
+#   1. yyyymmdd          : 20121212 
+#   2. mmdd              : 0202
+#   3. hhmmss            : 121212
+#   4. yyyymmddhhmmss    : 20121212000000
+EOF
+
+sub {
+    1;
+};
+
+__END__

@@ -1,0 +1,110 @@
+#!/usr/bin/perl
+use strict;
+use warnings;
+use Getopt::Long;
+use POE;
+
+my $host;
+my $port;
+my $cb;
+my $mode;
+my $codec;
+my $rtn = GetOptions(
+    'host|h=s'     => \$host,
+    'port|p=i'     => \$port,
+    'callback|c=s' => \$cb,
+    'mode|m=s'     => \$mode,   # tcpd,httpd
+    'codec=s'      => \$codec,  #
+);
+unless($rtn) {
+    &usage;
+}
+
+# host
+unless($host) {
+    $host = '0.0.0.0';
+}
+
+# port
+unless($port) {
+    warn "port needed";
+    &usage;
+}
+
+# mode
+unless($mode) {
+    warn "mode[tcpd, httpd] needed";
+    &usage;
+}
+
+# callback
+unless($cb) {
+    warn "callback file needed";
+    &usage;
+}
+unless( -f $cb) {
+   warn "file[$cb does not exist";
+   &usage;
+}
+my $fcb = do $cb;
+unless($fcb) {
+   warn "can not do file[$cb] error[$@]";
+   &usage;
+}
+
+
+##############################
+if ($mode =~ /tcpd/) {
+    # codec
+    unless($codec =~ /^(ascii\s+\d{1,}|binary\s+\d{1,}|http)$/) {
+        unless( -f $codec) {
+            warn "file[$codec] does not exist";
+            &usage;
+        }
+        $codec = do $codec;
+        if ($@) {
+            warn "can not do file[$codec] error[$@]";
+            &usage;
+        } 
+   }
+   eval "use Zeta::POE::TCPD;";
+   if ($@) {
+       die "use Zeta::POE::TCPD error[$@]";
+   }
+   warn "load TCPD success!!!\n";
+   Zeta::POE::TCPD->spawn( 
+       ip       => $host,
+       port     => $port,
+       callback => $fcb,
+       codec    => $codec,
+   );
+   $poe_kernel->run();
+}
+elsif ($mode =~ /httpd/) {
+   eval "use Zeta::POE::HTTPD;";
+   if ($@) {
+       die "use Zeta::POE::HTTPD error[$@]";
+   }
+   warn "load HTTPD success!!!\n";
+   Zeta::POE::HTTPD->spawn( 
+       ip       => $host,
+       port     => $port,
+       callback => $fcb,
+   );
+   $poe_kernel->run();
+}
+else {
+   die "unsupported mode[$mode]";
+}
+
+exit 0;
+
+sub usage {
+    die <<EOF;
+usae: zsvc -h 192.168.1.10 \
+           -p 8888 \
+           -c /tmp/callback.pl \
+           -m httpd|tcpd \
+           --codec 'ascii 4|datfile.codec' 
+EOF
+}

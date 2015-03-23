@@ -1,0 +1,3 @@
+cd $TAPP_HOME/log;
+zeta -f $TAPP_HOME/conf/zeta.conf;
+          

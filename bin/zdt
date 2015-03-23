@@ -1,0 +1,115 @@
+#!/usr/bin/perl
+use strict;
+use warnings;
+use DateTime;
+use Zeta::DT;
+use Getopt::Long;
+use DBI;
+
+my $from;
+my $to;
+my $work;
+my $exec;
+my $rtn = GetOptions(
+    "from|f=s" => \$from,   
+    "to|t=s"   => \$to,     # 默认是昨天
+    "exec|e=s" => \$exec,   # 默认是依次打印每个日期
+    "work|w"   => \$work,   # flag
+);
+unless($rtn) {
+    &usage;
+}
+unless($from) {
+    warn "ERROR: --from|f invalid arguments";
+    &usage;
+}
+
+unless($from =~ /^(\d{4})(\d{2})(\d{2})$/) {
+    warn "--from|-f invalid arguments";
+    &usage;
+}
+$from = "$1-$2-$3";
+
+$to ||= DateTime->now(time_zone => 'local')->ymd('');
+unless($to =~ /^(\d{4})(\d{2})(\d{2})$/) {
+    warn "--to|-t invalid arguments";
+    &usage;
+}
+$to = "$1-$2-$3";
+
+# 连接数据库
+my $dbh = DBI->connect(
+    $ENV{DSN},
+    $ENV{DB_USER},
+    $ENV{DB_PASS},
+    {
+        RaiseError       => 1,
+        PrintError       => 0,
+        AutoCommit       => 0,
+        FetchHashKeyName => 'NAME_lc',
+        ChopBlanks       => 1,
+        InactiveDestroy  => 1,
+    },
+);
+if ($ENV{DB_SCHEMA}) {
+    $dbh->do("set current schema $ENV{DB_SCHEMA}");
+}
+my $dt = Zeta::DT->new($dbh);
+my $cur = $from;
+while($cur ne $to) {
+    my $t = $cur;
+
+    # 遍历工作日的话
+    if ($work) {
+        goto NEXT unless $dt->is_wday($t);
+    }
+    $t =~ s/-//g;
+
+    if ($exec) { 
+        `$exec $t`;
+        if ( 0 != $?<<8) {
+            warn "can not execute cmd[$exec $t] errno[$?]";
+        }
+    }
+    else {
+        print "$t\n";
+    }
+NEXT:
+    $cur = $dt->next_n_day($cur, 1);
+}
+
+sub usage {
+    die <<EOF;
+    
+Usage:
+
+    zdt --from|-f  20131111 [--to|t 20131212] [--exec|-e 'gen_rpt.pl -d'] [--work|-w]
+    
+参数说明:
+
+    --from, -f 
+    从哪天开始
+    
+    --to -t
+    到哪天为止但不包括这天, 默认是当天
+    
+    --work|-w
+    所有工作日, 否则是返回所有自然日
+    
+    --exec|-e
+    以这个日期为参数执行什么命令， 默认是将日期按行输出
+    
+注意：
+    1. 此应用依赖数据, 需要环境变量:
+       \$ENV{DSN}
+       \$ENV{DB_USER}
+       \$ENV{DB_PASS}
+       \$ENV{DB_SCHEMA}  : 可选
+       
+    2. 数据库必须有dict_holi表， 记录节假日信息表
+    
+EOF
+}
+
+__END__
+

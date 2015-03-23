@@ -1,0 +1,228 @@
+#!/usr/bin/perl
+use strict;
+use warnings;
+use Carp;
+use File::Basename;
+use Zeta::Run;
+
+########################################################################
+#                        check.plugin
+#-----------------------------------------------------------------------
+#  dependencies          : N
+#  initialization param  : N/A
+#  interface             :
+#   1. check_mode        : 检查运行模式
+#   2. check_log         : 检查日志配置
+#   3. check_mlist       : 检查模块列表
+#   4. check_module      : 检查模块配置
+#   5. check_kernel      : 检查kernel参数
+########################################################################
+
+#
+# 检查运行模式
+#
+helper check_mode => sub {
+    
+    my ($self, $args) = @_;
+
+    #  process_tree   :  前台运行进程组
+    #  logger         :  后台运行
+    #  loggerd        :  后台运行带日志进程
+    # warn "in check_mode:\n";
+    # Data::Dump->dump($args);
+    unless ( $args->{mode} =~ /^(logger|process_tree|loggerd)$/ ) {
+        confess "mode must be either of logger process_tree loggerd";
+        return;
+    }
+
+    # logger and loggerd mode need pidfile
+    if ( $args->{mode} =~ /^(logger|loggerd)/ ) {
+        unless ( defined $args->{pidfile} ) {
+            confess "logger|loggerd mode need pidfile";
+        }
+        my $dir = dirname( $args->{pidfile} );
+        unless ( -d $dir ) {
+            confess "$dir does not exist";
+        }
+    }
+
+    return $self;
+
+};
+
+#
+#  检查日志
+#
+helper check_log => sub {
+
+    my ($self, $args) = @_;
+
+    unless ( $args->{loglevel} =~ /^(DEBUG|INFO|WARN|ERROR|FATAL|CRIT)$/ ) {
+        confess "invalid loglevel";
+    }
+    
+    unless ( defined $args->{logurl} ) {
+        confess "logurl needed";
+    }
+
+    # loggerd mode need logname
+    if ( $args->{mode} =~ /^loggerd$/ ) {
+        unless ( defined $args->{logname} ) {
+            confess "logname must be provided";
+        }
+    }
+
+    return $self;
+
+};
+
+#
+# 检查模块列表
+#   module       => {
+#     'Zbat_writer' => {
+#        writer => 'chan_zbat',
+#        para   => [],
+#        code   => \&subroutine
+#        exec   => /path/of/exec-file
+#        reap   => 1,
+#     },
+#
+#     'Zbat_reader' => {
+#        reader => 'chan_zbat',
+#        para   =>  [],
+#        code   =>  \&subroutine
+#        exec   => /path/of/exec-file
+#        reap   => 1,
+#     },
+#   }
+#
+helper check_mlist  => sub {
+    
+    my ($self, $mlist) = @_;
+    for my $mname ( keys %$mlist ) {
+        my $m = $mlist->{$mname};
+        unless ( $self->check_module($m) ) {
+            confess "check_module[$mname] failed";
+        }
+    }
+    return $self;
+};
+
+#
+# 模块检查
+#
+helper check_module => sub {
+
+    my ($self, $m) = @_;
+    
+    my $channel = $self->channel;
+   
+    # check order
+    unless( exists $m->{order} ) {
+        warn "order must be provided";
+        return;
+    }
+
+    #check reap
+    unless ( exists $m->{'reap'} ) {
+        $m->{'reap'} = 1;
+    }
+
+    # check reader
+    if ( $m->{reader} and not exists $channel->{ $m->{reader} } ) {
+        confess "reader channel[$m->{reader}] does not exist";
+    }
+
+    # check writer
+    if ( $m->{writer} and not exists $channel->{ $m->{writer} } ) {
+        confess "writer channel[$m->{writer}] does not exist";
+    }
+
+    # check mreader
+    my %rpipe;
+    my @mreader_str;
+    if ( $m->{mreader} ) {
+        for ( @{ $m->{mreader} } ) {
+            unless ( exists $channel->{$_} ) {
+                confess "mreader channel[$_] does not exist";
+            }
+            $rpipe{$_} = $channel->{$_}->{reader}->fileno();
+            push @mreader_str, "$_:$rpipe{$_}";
+
+        }
+    }
+
+    # check mwriter
+    my %wpipe;
+    my @mwriter_str;
+    if ( $m->{mwriter} ) {
+        for ( @{ $m->{mwriter} } ) {
+            unless ( exists $channel->{$_} ) {
+                confess "mwriter channel[$_] does not exist";
+            }
+            $wpipe{$_} = $channel->{$_}->{writer}->fileno();
+            push @mwriter_str, "$_:$wpipe{$_}";
+        }
+    }
+
+    # 模块参数检查
+    my $mpara = $m->{'para'};
+    my $mpref = ref $mpara;
+    unless ( $mpref =~ /ARRAY/ ) {
+        confess "invalid para type[$mpref]";
+    }
+
+    # check code and exec
+    if ($m->{code} && $m->{exec}) {
+      confess "code and exec are mutual exclusive";
+    }
+
+    # 函数指针
+    if ($m->{code}) {
+        my $mcref = ref $m->{code};
+        unless($mcref =~ /CODE/) {
+            confess "code must be code ref[$mcref]";
+        } 
+    }
+    # 可执行文件 
+    elsif($m->{exec}) {
+        unless( -f $m->{exec} &&  -x $m->{exec} ) {
+             confess "file $m->{exec} invalid";
+         }
+         # code为可执行文件时, 多目标writer|reader
+         $m->{mw_arg} = join ',', @mwriter_str if @mwriter_str;
+         $m->{mr_arg} = join ',', @mreader_str if @mreader_str;
+
+         return 1;
+    }
+    # code, exec 必须有一个设置 
+    else {
+        confess "either code or exec must be set";
+    }
+
+    return $self;
+};
+
+
+warn "-------------------------\n"  and
+warn "check.plugin loaded:\n"  and
+warn "-------------------------\n"  and
+warn <<'EOF' if $ENV{PLUGIN_LOAD_DEBUG};
+#  dependencies          :  
+#  initialization param  : N/A
+#  interface             :
+#   1. check_mode        : 检查运行模式
+#   2. check_log         : 检查日志配置
+#   3. check_mlist       : 检查模块列表
+#   4. check_module      : 检查模块配置
+EOF
+
+sub {
+    my $args = shift;
+    zkernel->check_mode($args);
+    zkernel->check_log($args);
+    zkernel->check_mlist($args->{module});
+};
+
+
+__END__

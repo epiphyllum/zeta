@@ -1,0 +1,586 @@
+#!/usr/bin/perl
+use strict;
+use warnings;
+use Carp;
+
+use IO::Handle;
+use Fcntl;
+use POSIX qw/:sys_wait_h WNOHANG setsid/;
+use Zeta::Run;
+use Zeta::Log;
+
+########################################################################
+#                        process.plugin
+#-----------------------------------------------------------------------
+#  dependencies          : logger channel
+#  initialization param  : N/A
+#  description           : 负责进程管理
+#  interface             :
+#   1. process_running   : 运行中进程列表
+#   2. process_stopped   : 被停止的进程列表
+#   2. process_logname   : loggerd进程的名称
+#   3. process_loggerd   : 专用logger进程
+#   3. process_new       : 创建新的进程
+#   4. process_batch     : 批量创建新进程
+#   5. process_run       : 进程运行
+#   6. process_sigchld   : 父进程收到sigchld
+#   7. process_sigterm   : 父进程收到sigterm
+#   8  process_submit    : 机构进程模块
+########################################################################
+
+my %running;
+my %stopped;
+my $logname;
+
+helper process_running => sub { \%running };
+helper process_count   => sub { keys %running };
+helper process_stopped => sub { \%stopped };
+helper process_logname => sub { $logname };
+
+#
+# argument:
+# {
+#  name       => process_name
+#  code|exec  => sub ref | /path/of/file
+#  para       => []
+#  reader     => 'chan_a',
+#  writer     => 'chan_b',
+#  mreader    => [],
+#  mwriter    => [],
+# }
+#
+helper process_new => sub {
+
+    my ( $self, $args ) = @_;
+
+    my $logger = $self->logger;
+
+    $logger->debug( "new child with args:\n", Data::Dump->dump($args) )
+      if $logger;
+
+    $args->{last} = time;
+
+    my $child = fork;
+    unless ( defined $child ) {
+        warn "fork error";
+        return;
+    }
+
+    ####################
+    # parent
+    ####################
+    if ($child) {
+        $running{ $args->{'name'} } = [ $child, $args ];
+        return $self;
+    }
+    ####################
+    # child
+    ####################
+    else {
+        $self->process_run($args);
+        exit 0;
+    }
+
+};
+
+#
+#  {
+#  name   => process_name
+#  code   => sub ref
+#  exec   => exec file
+#  para   => []
+#  reader =>
+#  writer =>
+#  size   => 10
+#  }
+#
+helper process_batch => sub {
+
+    my ( $self, $args ) = @_;
+
+    my $logger = $self->logger;
+    $logger->debug( "batch_child args:\n", Data::Dump->dump($args) );
+
+    my $batch_name = $args->{'name'};
+    my $size       = delete $args->{'size'};
+
+    $logger->info("batch_child[$batch_name] size[$size] reap[$args->{'reap'}]");
+
+    for ( my $idx = 0 ; $idx < $size ; ++$idx ) {
+
+        my $child = fork;
+        unless ( defined $child ) {
+            warn "fork error";
+            return;
+        }
+
+        ##########################
+        # parent
+        ##########################
+        if ($child) {
+            my %reg = %$args;
+            $reg{'last'} = time;
+            $reg{'name'} = $batch_name . "." . $idx;
+            $running{ $reg{'name'} } = [ $child, \%reg ];    # register child
+            next;
+        }
+        ##########################
+        # child
+        ##########################
+        else {
+            $args->{'name'} = $batch_name . "." . $idx;
+            $self->process_run($args);
+            exit 0;
+        }
+    }
+
+    return 1;
+};
+
+#
+# 子进程处理
+#
+helper process_run => sub {
+
+    my ( $self, $args ) = @_;
+
+    my $logger  = $self->logger;
+    my $channel = $self->channel;
+
+    my $code = $args->{'code'};
+    my $exec = $args->{'exec'};
+
+    my $para = $args->{'para'};
+    my $name = $args->{'name'};
+    my ( $reader, $rw );
+    my ( $writer, $wr );
+
+    if ( $args->{reader} ) {
+        $reader = $channel->{ $args->{'reader'} }->{reader};
+        $rw     = $channel->{ $args->{'reader'} }->{writer};
+    }
+    if ( $args->{writer} ) {
+        $writer = $channel->{ $args->{'writer'} }->{writer};
+        $wr     = $channel->{ $args->{'writer'} }->{reader};
+    }
+
+    # setup prctl name
+    $0 = $name;
+
+    # reader, writer是两个特殊的参数
+    if ($reader) {
+        close($rw);
+        open STDIN, "<&", $reader;    # child read from stdin is read from child
+    }
+    if ($writer) {
+        close($wr);
+        open STDOUT, ">&", $writer;
+    }
+
+    #
+    # 外部可执行代码
+    #
+    if ( defined $exec && -f $exec ) {
+
+        #
+        # mwriter && mreader
+        #
+        if ( $args->{mr_arg} ) {
+            for ( @{ $args->{mreader} } ) {
+                fcntl( $channel->{$_}->{reader}, F_SETFD, 0 )
+                  ;    # closeonexec set to 0
+                close( $channel->{$_}->{writer} );
+            }
+        }
+        if ( $args->{mw_arg} ) {
+            for ( @{ $args->{mwriter} } ) {
+                fcntl( $channel->{$_}->{writer}, F_SETFD, 0 )
+                  ;    # closeonexec set to 0
+                close( $channel->{$_}->{reader} );
+            }
+        }
+
+        my $mr = $args->{mr_arg} || 'mr';
+        my $mw = $args->{mw_arg} || 'mw';
+        $logger->debug("mr => $mr, mw => $mw");
+        if ( $mr eq 'mr' && $mw eq 'mw' ) {   # no multi-reader, no multi writer
+            $logger->debug("exec($exec @$para --process_name $name)");
+            exec( $exec, @$para, "--process_name", $name );
+        }
+        else {
+            if ( $mr eq 'mr' ) {              #  have multi-writer
+                $logger->debug(
+                    "exec($exec @$para --mwriter $mw  --process_name $name)");
+                exec( $exec, @$para, "--mwriter", $mw, "--process_name",
+                    $name );
+            }
+            elsif ( $mw eq 'mw' ) {           # have multi-reader
+                $logger->debug(
+                    "exec($exec @$para --mreader $mr --process_name $name)");
+                exec( $exec, @$para, "--mreader", $mr, "--process_name",
+                    $name );
+            }
+            else {    # have both multi-reader and multi-writer
+                $logger->debug(
+"exec($exec @$para --mreader $mr --mwriter $mw --process_name $name)"
+                );
+                exec( $exec, @$para, "--mreader", $mr, "--mwriter", $mw,
+                    "--process_name", $name );
+            }
+        }
+        exit 0;
+    }
+
+    # 内部函数指针
+    else {
+        unless ( defined $code ) {
+            warn "internal error code is not code ref";
+            exit 0;
+        }
+
+        my $cref = ref $code;
+        unless ( $cref =~ /CODE/ ) {
+            warn "internal error code is not code ref";
+            exit 0;
+        }
+
+        # no strict;
+        $self->logger_reset( $self->logger->clone("$name.log") );
+        open STDERR, ">&", $self->logger->{logfh};
+
+        # setup default signal handler
+        local $SIG{TERM} =
+          sub { $self->logger->error("I(child) am exiting..."); CORE::exit(0); };
+        local $SIG{INT}  = sub { exit 0; };
+        local $SIG{CHLD} = 'IGNORE';
+        local $SIG{HUP}  = 'DEFAULT';
+
+        # child-process plugin load
+        my $plugin = $args->{'plugin'};
+
+        # warn "begin init child plugin: \n" . Data::Dump->dump($plugin);
+        for ( keys %$plugin ) {
+            $self->load_plugin($_);
+            $self->init_plugin( $_, $plugin->{$_} );
+        }
+
+        # 执行
+        $code->(@$para);
+        exit 0;
+
+    }
+
+    exit 0;
+};
+
+#
+# $self->process_loggerd($logurl, { reader => $r, writer => $w } )
+#
+helper process_loggerd => sub {
+    my ( $self, $name, $logurl, $pipe ) = @_;
+    $logname = $name;
+    my $loggerd = $self->process_new(
+        {
+            name => $logname,
+            code => sub {
+                close $pipe->{writer};
+                Zeta::Log->loggerd(
+                    'logurl'     => $logurl,
+                    'pipereader' => $pipe->{reader}
+                );
+                exit 0;
+            },
+            para => [],
+            reap => 1,
+        }
+    );
+};
+
+#
+# 启动所有模块
+#
+helper process_runall => sub {
+    my ( $self, $mlist ) = @_;
+
+    my $logger = $self->logger;
+
+    #--------------------------------------------------------------
+    # 启动顺序 支持, 模块配置增加order字段
+    #--------------------------------------------------------------
+    my @names =
+      sort { $mlist->{$a}{order} <=> $mlist->{$b}{order} } keys %$mlist;
+
+    for my $mname (@names) {
+        my $m = $mlist->{$mname};
+        $m->{'name'} = $mname;
+
+        my $child;
+        if ( exists $m->{size} && $m->{size} > 1 ) {
+            $child = $self->process_batch($m);
+        }
+        else {
+            $child = $self->process_new($m);
+        }
+        sleep 0.2;
+    }
+
+    # for my $mname ( keys %$mlist ) {
+    #
+    #     # my $m = $mlist->{$mname};
+    #     # $m->{'name'} = $mname;
+    #
+    #     # my $child;
+    #     # if ( exists $m->{size} && $m->{size} > 1 ) {
+    #     #     # $child = $self->process_batch($m);
+    #     # }
+    #     # else {
+    #     #     # $child = $self->process_new($m);
+    #     # }
+    # }
+    return 1;
+};
+
+#
+#
+#
+helper process_stopall => sub {
+    my $self = shift;
+    local $SIG{TERM} = 'IGNORE';
+    kill 15, -1;
+};
+
+#
+# 子进程回收并重启
+#
+helper process_sigchld => sub {
+    my $self = shift;
+
+    my $logger = $self->logger;
+
+    my $child;
+    while ( ( $child = waitpid( -1, WNOHANG ) ) > 0 ) { ; }
+
+    for my $name ( keys %running ) {
+
+        my $pid = $running{$name}->[0];
+        my $arg = $running{$name}->[1];
+
+        next unless $pid > 0;    # pid < 0 is drop out
+
+        my $rtn = kill( 0, $pid );
+        if ( $rtn == 0 ) {
+
+            $logger->warn("kid[$pid => $name] reapable[$arg->{'reap'}] died");
+
+            ######################################
+            # 只有这个进程是reapable的才能重启
+            ######################################
+            if ( $arg->{'reap'} ) {
+                $arg->{restart}++;    # 登记重启次数
+                                      #
+                 # 当前时间和上次重启时间小于1s, 而重启次数很多
+                 # 短时间内高重启次数， 将此进程放入stopped队列,然后启动定时器，定时重启stopped中的模块
+                 # 下次sigchld将不会重启此进程,
+                 #
+                my $now = time;
+                if ( $now - $arg->{last} < 1 ) {
+                    $arg->{'break'}++;
+                    if ( $arg->{'break'} > 9 ) {
+                        $logger->warn(
+"process $name restarted too frequently, transfer it to stopped"
+                        );
+                        $arg->{'break'} = 0;
+                        $stopped{$name} = delete $running{$name};
+                        $logger->warn( Data::Dump->dump($self) );
+                        next;
+                    }
+                }
+                else {
+                    $arg->{'break'} = 0;
+                }
+
+                ############################
+                # restart the child
+                ############################
+                unless ( $self->process_new($arg) ) {
+                    $logger->warn("new child $name failed");
+                    next;
+                }
+
+                $arg->{last} = $now;
+                $logger->warn("kid $name restarted");
+            }
+            ################################
+            # 不可回收进程， 直接删除
+            ################################
+            else {
+                delete $running{$name};
+            }
+        }
+    }
+    $SIG{CHLD} = sub { $self->process_sigchld(); };
+};
+
+#
+# got SIGTERM signal
+#
+helper process_sigterm => sub {
+    my $self = shift;
+
+    my $logger = $self->logger;
+
+    local $SIG{TERM} = 'IGNORE';
+    local $SIG{CHLD} = 'IGNORE';
+
+    my $running = $self->process_running;
+    my $loggerd;
+
+    #
+    #  先将logggerd进程摘下
+    if ( $logname and exists $running->{$logname} ) {
+        $loggerd = delete $running->{$logname};
+    }
+    $logger->warn("ZLogger will be the second last to die") if defined $loggerd;
+
+    my @died;
+
+    my @pname =
+      sort { $running->{$b}[1]{order} <=> $running->{$a}[1]{order} }
+      keys %$running;
+
+    # 给所有运行中的进程发送TERM信号
+    for my $name (@pname) {
+        my $pid = $running->{$name}->[0];
+        my $arg = $running->{$name}->[1];
+        my $ord = $arg->{order};
+        $logger->warn("begin kill $name pid[$pid] order[$ord]");
+        kill 'TERM', $pid if $pid > 0;
+        push @died, $pid;
+    }
+
+    # 对于所有被发送了TERM信号的进程， 检查是否死掉?
+    for (@died) {
+        my $rtn = kill( 0, $_ );
+        if ( $rtn != 0 ) {
+            sleep 0.2;
+            next;
+        }
+    }
+
+    # 保证日志进程loggerd为最后一个退出的子进程
+    if ( defined $loggerd ) {
+        my $log_pid = $loggerd->[0];
+        $logger->warn("begin kill ZLogger pid[$log_pid]");
+        kill 'TERM', $log_pid;
+    }
+    else {
+        $logger->warn("$0: all child died");
+    }
+
+    # 删除pid文件
+    unlink $self->daemonize_pidfile
+      if defined $self->daemonize_pidfile and -f $self->daemonize_pidfile;
+
+    # 主进程退出
+    exit 0;
+
+};
+
+#
+# 定期将stopped列表中进程启动
+#
+helper signal_alrm => sub {
+
+    my $self   = shift;
+    my $logger = $self->logger;
+    $logger->warn("SIGALRM recieved...");
+    my $stopped = $self->process_stopped;
+    for my $name ( keys %$stopped ) {
+        $logger->warn("begin wakeup $name...");
+        my $arg = $stopped->{$name}->[1];
+        unless ( $self->process_new($arg) ) {
+            $logger->warn("new child $name failed");
+            next;
+        }
+        $self->process_running->{$name} = delete $stopped->{$name};
+    }
+    alarm 5;
+};
+
+#
+# 提交运行模块
+# $self->submit($mname, $args);
+#
+helper process_submit => sub {
+
+    my ( $self, $mname, $args ) = @_;
+
+    $args->{'name'} = $mname;
+    my $logger = $self->logger;
+
+    # check module name
+    if (   exists $running{$mname}
+        || exists $running{"$mname.0"}
+        || exists $stopped{"$mname"}
+        || exists $stopped{"$mname.0"} )
+    {
+        $logger->error("module $mname already exists, reassign a module name");
+        return;
+    }
+
+    # set reap flag, 默认模块是可回收的
+    unless ( exists $args->{'reap'} ) {
+        $args->{'reap'} = 1;
+    }
+
+    # check module_code: 检查模块参数
+    unless ( $self->check_module($args) ) {
+        $logger->debug("module[$mname] _check_module failed");
+        return;
+    }
+
+    ##########################
+    # begin start module...
+    ##########################
+    if ( exists $args->{'size'} && $args->{'size'} > 1 ) {
+        my $child = $self->child_batch($args);
+    }
+    else {
+        my $child = $self->process_new($args);
+    }
+    return 1;
+
+};
+
+warn "-------------------------\n"
+  and warn "process.plugin loaded:\n"
+  and warn "-------------------------\n"
+  and warn <<EOF if $ENV{PLUGIN_LOAD_DEBUG};
+#  dependencies          : logger channel
+#  initialization param  : N/A
+#  description           : 负责进程管理
+#  interface             :
+#   1. process_running   : 运行中进程列表
+#   2. process_stopped   : 被停止的进程列表
+#   2. process_logname   : loggerd进程的名称
+#   3. process_loggerd   : 专用logger进程
+#   3. process_new       : 创建新的进程
+#   4. process_batch     : 批量创建新进程
+#   5. process_run       : 进程运行
+#   6. process_sigchld   : 父进程收到sigchld
+#   7. process_sigterm   : 父进程收到sigterm
+#   8  process_submit    : 机构进程模块
+EOF
+
+#
+# $initor->();
+#
+sub {
+    $SIG{'PIPE'} = 'IGNORE';
+    $SIG{'TERM'} = sub { zkernel->process_sigterm; };    # termination
+    $SIG{'CHLD'} = sub { zkernel->process_sigchld; };    # restart the died
+    $SIG{'HUP'}  = 'DEFAULT';                            # very important
+    return 1;
+};
+
+__END__

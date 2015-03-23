@@ -1,0 +1,5 @@
+#!/bin/bash
+
+kill `cat $THREAD_HOME/log/zeta.pid`;
+rm -fr $THREAD_HOME/log/zeta.pid;
+

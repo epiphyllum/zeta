@@ -1,0 +1,67 @@
+#!/usr/bin/perl
+use strict;
+use warnings;
+use DBI;
+use Getopt::Long;
+use Carp;
+use Zeta::DT;
+
+my $year;  # 年份
+my $cfg;   # 配置文件
+my $dsn;   # 数据库配置:
+my $user;
+my $pass;;
+my $schema;
+my $rtn = GetOptions(
+    'y|year=i'   => \$year,
+    'c|cfg=s'    => \$cfg,
+    'd|dsn=s'    => \$dsn,
+    'u|user=s'   => \$user,
+    'p|pass=s'   => \$pass,
+    's|schema=s' => \$schema,
+);
+
+unless($rtn && defined $year && defined $cfg && defined $dsn) {
+    &usage();
+}
+
+if ($dsn =~ /DB2/) {
+     unless(defined $schema) {
+          confess "schema needed";
+     }
+}
+
+unless( -f $cfg) {
+  die "$cfg does not exist";
+}
+
+my $opts = {
+    RaiseError       => 1,
+    PrintError       => 0,
+    AutoCommit       => 0,
+    FetchHashKeyName => 'NAME_lc',
+    ChopBlanks       => 1,
+    InactiveDestroy  => 1,
+};
+my $dbh = DBI->connect( $dsn, $user, $pass, $opts);
+unless($dbh) {
+    die "can not connect to db[$dsn] user[$user] pass[$pass]";
+}
+$dbh->do("set current schema $schema");
+
+Zeta::DT->add_holi($dbh, $year, $cfg);
+
+exit 0;
+
+sub usage {
+    die <<EOF;
+holi_add --dsn  'dbi:SQLite:/tmp/zstl.db' 
+         --year 2012
+         --cfg  '/tmp/holi.d/2012.ini'
+         --user 'user'
+         --pass 'pass'
+EOF
+}
+
+__END__
+

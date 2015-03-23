@@ -1,0 +1,132 @@
+#!/usr/bin/perl
+use strict;
+use warnings;
+use Carp;
+
+use Zeta::Run;
+use Symbol;
+
+########################################################################
+#                        check.plugin
+#-----------------------------------------------------------------------
+#  dependencies          : N
+#  initialization param  : $chnl_name $chnl_name ....
+#  interface             :
+#   1. channel           : 管道列表
+#   2. channel_reader    : 获取管道读端
+#   3. channel_writer    : 获取管道写端
+#   4. channel_new       : 新建一个管道
+#   5. channel_add       : 添加一个全局管道
+#   6. channel_option    : mwriter mreader 的exec进程需要解析
+########################################################################
+
+my %channel;
+
+
+#
+# 获取通道的读端 : $self->channel_reader('chnl_a')
+# 获取通道的写端 : $self->channel_reader('chnl_b')
+# 创建一个pipe  : $self->channel_new()
+# 增加全局管道   : $self->channel_add('chnl_x')
+#
+#
+helper channel        => sub { \%channel };
+helper channel_reader => sub { shift; $channel{+shift}->{'reader'}; };
+helper channel_writer => sub { shift; $channel{+shift}->{'writer'}; };
+helper channel_new    => sub {
+    no strict;
+    my ($r, $w)  = (gensym, gensym);
+    pipe( $r, $w );
+    $r->blocking(1);
+    $w->autoflush(1);
+    return { reader => $r, writer => $w,};
+};
+helper channel_add => sub {
+    
+    my ($self, $name) = @_;
+
+    if ( exists $channel{$name} ) {
+        confess "channel[$name] already exists";
+    }
+
+    $channel{$name} = $self->channel_new();
+
+    return 1;
+};
+
+
+#
+# mwriter mreader 的exec进程需要解析
+# $self->channel_option()
+#
+helper channel_option => sub {
+
+    my $self = shift;
+    my %args;
+    my $idx = 0;
+    for (@ARGV) {
+      if($ARGV[$idx] =~ /^--(mreader|mwriter|process_name)$/) {
+        last;
+      }
+      $idx++;
+    }
+    %args = @ARGV[$idx .. $#ARGV]; # 新增的命令行参数
+    @ARGV = @ARGV[0 .. $idx - 1];  # 原来的命令行参数
+
+    # Data::Dump->dump(\%args, \@ARGV);
+
+    my %multi;
+    for my $type (qw/mreader mwriter/) {
+        next unless exists $args{"--$type"};
+        my $mode = 'w';
+        if ($type =~ /--mreader/) {
+           $mode = 'r';
+        }
+        for ( split ',', $args{"--$type"} ) {
+            if (/(.*):(\d+)/) {
+                eval {
+                    unless ( $multi{$type}{$1} = IO::Handle->new_from_fd( $2, $mode )) {
+                        warn "[$!]" if $!;
+                    }
+                    $multi{$type}{$1}->autoflush(1);
+                };
+                if ($@) {
+                    warn "[$@]";
+                    return;
+                }
+            }
+        }
+    }
+    $multi{name} = $args{'--process_name'};
+    return \%multi;
+};
+warn "-------------------------\n"  and
+warn "channel.plugin loaded:\n"     and
+warn "-------------------------\n"  and
+warn <<'EOF' if $ENV{PLUGIN_LOAD_DEBUG};
+#  dependencies          :  
+#  initialization param  : $chnl_name $chnl_name ....
+#  interface             :
+#   1. channel           : 管道列表
+#   2. channel_reader    : 获取管道读端
+#   3. channel_writer    : 获取管道写端
+#   4. channel_new       : 新建一个管道
+#   5. channel_add       : 添加一个全局管道
+#   6. channel_option    : mwriter mreader 的exec进程需要解析
+EOF
+
+
+#
+# 初始化时， 可以预先创建一些channel
+# $initor->('a', 'b' ...)
+#
+sub {
+    for (@_) {
+        zkernel->channel_add($_);
+    }
+    return 1;
+};
+
+
+__END__
+

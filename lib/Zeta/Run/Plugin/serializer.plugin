@@ -1,0 +1,59 @@
+#!/usr/bin/perl
+use strict;
+use warnings;
+use Carp;
+
+use Zeta::Run;
+use Env qw/ZBP_HOME/;
+use Zeta::Serializer::MP;
+
+########################################################################
+#                          序列化工具类
+#-----------------------------------------------------------------------
+#  dependencies          : N
+#  initialization param  : N/A
+#  interface             :
+#   1. serialize         : 序列化
+#   2. deserialize       : 反序列化 
+#   3. serializer        : 获取序列化对象
+########################################################################
+
+my $ser;
+
+helper serialize   => sub { shift; $ser->serialize(shift);   };
+helper deserialize => sub { shift; $ser->deserialize(shift); };
+helper serializer  => sub { $ser };
+
+warn "-------------------------\n"  and
+warn "serializer.plugin loaded:\n"  and
+warn "-------------------------\n"  and
+warn <<EOF if $ENV{PLUGIN_LOAD_DEBUG};
+#  dependencies          : N
+#  initialization param  : N/A
+#  interface             :
+#   1. serialize         : 序列化
+#   2. deserialize       : 反序列化 
+#   3. serializer        : 获取序列化对象
+EOF
+
+
+sub {
+    my $ser_name = shift;
+    if ($ser_name) {
+        eval "use $ser_name;";
+        if ($@) {
+            warn "load serializer[$ser_name] failed";
+            $ser = Zeta::Serializer::MP->new();
+            return 1;
+        }
+        $ser = $ser_name->new(@_) or confess "can not new Zeta::Serializer::MP";
+    }
+    else {
+        $ser = Zeta::Serializer::MP->new() or confess "can not new Zeta::Serializer::MP";
+    }
+    return 1;
+};
+
+
+__END__
+

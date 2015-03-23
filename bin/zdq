@@ -1,0 +1,50 @@
+#!/usr/bin/perl
+
+use Zeta::IPC::MsgQ;
+use Zeta::Log;
+use Getopt::Long;
+
+my $key;
+my $qid;
+my $mtype;
+my $show;
+my $rtn = GetOptions(
+   "key|k=i"  => \$key,
+   "qid|q=i"  => \$qid,
+   "type|t=i" => \$mtype,
+   "show|s=s" => \$show,
+);
+unless($rtn) {
+    warn "usage: ./zdq -k|--key 9494 [-q|--qid 00009898] --type|-t 0 -s|--show [ ascii | binary ]\n";
+    exit 0;
+}
+
+my $q;
+unless( $qid ) {
+    unless( $key) {
+        warn "invalid qid, usage: ./zdq  [-k 9898 | -q 00009898] -t 0 -s b/a";
+        exit 0;
+    }
+    else {
+        $q = Zeta::IPC::MsgQ->new($key);  
+    }
+} 
+else {
+    $q = bless \$qid, 'Zeta::IPC::MsgQ';
+}
+
+my $logger = Zeta::Log->new( logurl => 'stdout', loglevel => 'DEBUG');
+while(1) {
+    my $data;
+    $mtype = 0;
+    $q->recv(\$data, \$mtype);
+    warn <<EOF;
+-------------------------------------------------------
+mtype   : [$mtype]
+EOF
+    if ($show =~ /^(bB)/) {
+        $logger->debug_hex($data);
+    } else {
+        warn "$data\n";
+    }
+}

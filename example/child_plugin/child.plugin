@@ -1,0 +1,16 @@
+#!perl
+use Zeta::Run;
+
+
+my $cnt = 0;
+
+helper plugin_child => sub {
+    zlogger->debug("plugin_child cnt = $cnt");
+    $cnt++;
+};
+
+sub {
+    $cnt = shift;
+};
+
+

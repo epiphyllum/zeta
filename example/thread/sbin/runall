@@ -1,0 +1,6 @@
+#!/bin/bash
+
+cd $THREAD_HOME/log;
+
+zeta -f $THREAD_HOME/conf/zeta.conf;
+

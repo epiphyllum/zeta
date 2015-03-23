@@ -1,0 +1,10 @@
+use Zeta::Run;
+
+helper child_func => sub {
+         zlogger->debug("child_func is called");
+};
+
+# plugin initor
+sub {
+         1;
+};
